@@ -1,0 +1,30 @@
+# ─────────────────────────────────────────────
+# ResearchRAG — Python dependencies
+# Install with: pip install -r requirements.txt
+# ─────────────────────────────────────────────
+
+# Web UI
+streamlit>=1.35.0
+
+# PDF parsing
+PyMuPDF>=1.24.0
+
+# Embeddings (local, no API key required)
+sentence-transformers>=3.0.0
+
+# Vector store
+faiss-cpu>=1.8.0
+
+# LLM clients
+openai>=1.30.0
+anthropic>=0.28.0
+groq>=0.9.0
+
+# Configuration
+python-dotenv>=1.0.0
+
+# Scientific computing
+numpy>=1.26.0
+
+# Utilities (usually already installed, listed for completeness)
+# torch is pulled in automatically by sentence-transformers
