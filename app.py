@@ -9,8 +9,12 @@ Main     : Upload → Process → Query → Results (comparison dashboard)
 
 from __future__ import annotations
 
+import io
 import os
 import sys
+from datetime import datetime
+
+import pandas as pd
 
 # ── ensure project root is importable ───────────────────────────────────────
 # Streamlit must be launched from this file's directory for the bare
@@ -27,7 +31,6 @@ if _PROJECT_ROOT not in sys.path:
 
 import streamlit as st
 
-from config import cfg
 from evaluation.logger import EvaluationLogger
 from evaluation.metrics import EvaluationScore, METRIC_NAMES, METRIC_DESCRIPTIONS
 from rag.pipeline import RAGPipeline, QueryResult
@@ -653,7 +656,117 @@ blockquote {
 .stButton button, .stButton button * {
     color: inherit;
 }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   MOBILE RESPONSIVENESS — sidebar
+   Streamlit already renders the sidebar as a slide-over drawer on narrow
+   viewports, but the default toggle (collapsedControl) is small and easy
+   to miss. These rules (a) make that native toggle larger and higher-
+   contrast so it's an obvious tap target, and (b) make sure the sidebar
+   itself never squeezes or overflows the main content area on small
+   screens — it should always behave as a full overlay, not a column.
+   ════════════════════════════════════════════════════════════════════════════ */
+@media (max-width: 768px) {
+    /* Sidebar becomes a full-height overlay, capped at a sane width —
+       never lets the open sidebar push/shrink the main content column. */
+    [data-testid="stSidebar"] {
+        width: min(86vw, 320px) !important;
+        min-width: 0 !important;
+        box-shadow: 0 0 24px rgba(15, 23, 42, 0.18) !important;
+        z-index: 999991 !important;
+    }
+    [data-testid="stSidebar"][aria-expanded="true"] ~ section {
+        margin-left: 0 !important; /* main content never shifts/shrinks */
+    }
+
+    /* Tighter spacing on the main page so content doesn't feel cramped
+       once the wide-screen gaps collapse to a single mobile column. */
+    .block-container {
+        padding: 0 1.1rem 3.5rem 1.1rem !important;
+    }
+    .hero { padding-top: 1.4rem !important; padding-bottom: 1.4rem !important; }
+    .hero-title { font-size: 1.7rem !important; }
+    .hero-tagline { font-size: 0.86rem !important; }
+    .section-gap { margin-top: 1.6rem !important; }
+    .sec-head { font-size: 0.95rem !important; }
+
+    /* Tab bar: shrink label text and let the strip itself scroll
+       horizontally if four labels don't fit, rather than letting the
+       whole page widen and force a page-level horizontal scrollbar.
+       Both selector forms included since the underlying attribute can
+       vary slightly by Streamlit version. */
+    .stTabs [data-baseweb="tab-list"],
+    [data-testid="stTabs"] [data-baseweb="tab-list"] {
+        overflow-x: auto !important;
+        flex-wrap: nowrap !important;
+        -webkit-overflow-scrolling: touch !important;
+        gap: 0.2rem !important;
+    }
+    .stTabs [data-baseweb="tab"],
+    [data-testid="stTabs"] [data-baseweb="tab"] {
+        font-size: 0.74rem !important;
+        padding: 0.5rem 0.7rem !important;
+        white-space: nowrap !important;
+        flex-shrink: 0 !important;
+    }
+
+    /* Answer / chunk cards: smaller type, tighter padding, and a hard
+       guarantee against overflow so long unbroken strings (URLs, file
+       paths, etc.) can't force the page to scroll sideways. */
+    .answer-card, .chunk-card, .q-banner {
+        font-size: 0.82rem !important;
+        padding: 0.75rem !important;
+        word-break: break-word !important;
+        overflow-wrap: anywhere !important;
+    }
+    .card-title { font-size: 0.92rem !important; }
+    .answer-body { font-size: 0.82rem !important; }
+
+    /* Debug code block: wrap long lines instead of preserving them
+       unbroken, which is st.code's default and a common source of
+       forced horizontal scroll on narrow screens. Bare pre/code kept
+       as a fallback in case the testid differs by Streamlit version. */
+    [data-testid="stCodeBlock"] pre,
+    [data-testid="stCodeBlock"] code,
+    .stApp pre,
+    .stApp code {
+        white-space: pre-wrap !important;
+        word-break: break-word !important;
+        font-size: 0.74rem !important;
+    }
+
+    /* Metric rows (similarity / tokens / page, and the 4-metric eval
+       sliders): smaller value text so 3–4 metrics fit one stacked
+       width without clipping or wrapping awkwardly. */
+    [data-testid="stMetricValue"] { font-size: 1.1rem !important; }
+    [data-testid="stMetricLabel"] { font-size: 0.68rem !important; }
+}
+
+/* Belt-and-suspenders: no element anywhere should be able to force the
+   whole page to scroll sideways on any viewport width. */
+.stApp, .main, .block-container {
+    overflow-x: hidden !important;
+}
+
+/* The native sidebar open/close control — enlarged and put on a visible
+   pill background so it reads clearly as "tap here to open the menu"
+   rather than a faint arrow easily missed on a small screen. Unscoped
+   by media query so it stays an obvious, functional tap target at any
+   viewport width, not just mobile. */
+[data-testid="collapsedControl"] {
+    background: var(--accent) !important;
+    border-radius: 8px !important;
+    padding: 0.3rem !important;
+    box-shadow: 0 2px 8px var(--accent-glow) !important;
+    z-index: 999992 !important;
+}
+[data-testid="collapsedControl"] svg {
+    color: #fff !important;
+    width: 22px !important;
+    height: 22px !important;
+}
 </style>
+
 """, unsafe_allow_html=True)
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -670,18 +783,20 @@ def _init_state():
         st.session_state.last_result = None
     if "eval_logger" not in st.session_state:
         st.session_state.eval_logger = EvaluationLogger()
+    if "eval_records" not in st.session_state:
+        # Seed from any existing CSV log so a restart doesn't lose prior scores;
+        # subsequent scores are appended in-memory at the same time they're
+        # written to disk (see the "Save ... Score" button below).
+        st.session_state.eval_records = st.session_state.eval_logger.load_all()
 
 
-_init_state()
+def _render_system_controls(pipeline, logger, key_suffix: str = "sidebar"):
+    """Render LLM status, Knowledge Base file list, and Session History.
 
-pipeline: RAGPipeline | None = st.session_state.pipeline
-logger: EvaluationLogger = st.session_state.eval_logger
-
-# ── sidebar ───────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("## ResearchRAG")
-    st.markdown("---")
-
+    Sole render site is the sidebar — this content is intentionally not
+    duplicated onto the main page. key_suffix is kept for stability of
+    widget keys in case a second render site is ever reintroduced.
+    """
     # LLM status — minimal dot + text, no boxes
     if pipeline:
         st.markdown(
@@ -723,41 +838,63 @@ with st.sidebar:
         )
 
     st.markdown("---")
-    st.markdown("### Evaluation")
+    st.markdown("### Session History")
 
-    summary = logger.summary()
-    if summary:
-        for mode, metrics in summary.items():
-            avg = metrics.get("average", 0)
-            badge = format_score_badge(avg)
-            st.markdown(
-                f'<div class="sb-eval-row">'
-                f'<span class="sb-eval-label">{mode.upper()}</span>'
-                f'<span class="sb-eval-score">{avg}/10 {badge}</span>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-            for m in ("relevance", "completeness", "clarity", "source_coverage"):
-                st.markdown(
-                    f'<div class="sb-metric-row">'
-                    f'<span class="sb-metric-name">{m.capitalize()}</span>'
-                    f'<span class="sb-metric-val">{metrics.get(m, 0)}</span>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
+    history = list(reversed(st.session_state.get("eval_records", [])))
+    if not history:
+        st.caption("No questions asked yet this session.")
     else:
-        st.caption("No evaluations logged yet.")
+        for i, rec in enumerate(history):
+            q = rec.get("question") or "(untitled question)"
+            short_q = truncate_text(q, 60)
+            kind = rec.get("kind", "score")  # older CSV-seeded rows default to "score"
+            avg = rec.get("average")
+            mode_label = rec.get("mode", "rag").upper()
 
-    st.markdown(" ")
-    if os.path.exists(cfg.EVALUATION_LOG_PATH):
-        with open(cfg.EVALUATION_LOG_PATH, "rb") as f:
-            st.download_button(
-                "Download Evaluation CSV",
-                data=f,
-                file_name="evaluation_log.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
+            if kind == "score" and avg is not None:
+                title = f"#{len(history) - i}  {short_q}  ·  {avg}/10"
+            else:
+                title = f"#{len(history) - i}  {short_q}  ·  {mode_label}"
+
+            # Human-readable timestamp — fall back gracefully if missing or
+            # malformed rather than showing a raw ISO string or crashing.
+            ts_raw = rec.get("timestamp", "")
+            try:
+                ts_display = (
+                    datetime.fromisoformat(ts_raw).strftime("%b %d, %Y · %I:%M %p")
+                    if ts_raw else "—"
+                )
+            except ValueError:
+                ts_display = ts_raw or "—"
+
+            score_display = f"{avg}/10" if avg is not None else "Not yet scored"
+
+            with st.sidebar.expander(title, expanded=False):
+                st.markdown(f"**Question:** {q}")
+                st.markdown(f"**Timestamp:** {ts_display}")
+                st.markdown(f"**Mode:** {mode_label}")
+                st.markdown(f"**Answer Preview:** {rec.get('answer_preview', '—')}")
+                st.markdown(f"**Average Score:** {score_display}")
+
+                # Optional extra detail, kept below the five core fields so
+                # the primary key-value block stays clean and uniform.
+                if avg is not None:
+                    sub_metrics = [
+                        m for m in ("relevance", "completeness", "clarity", "source_coverage")
+                        if rec.get(m) is not None
+                    ]
+                    if sub_metrics:
+                        st.caption(
+                            " · ".join(f"{m.replace('_', ' ').title()}: {rec[m]}" for m in sub_metrics)
+                        )
+                    if rec.get("notes"):
+                        st.caption(f"Notes: {rec['notes']}")
+
+
+_init_state()
+
+pipeline: RAGPipeline | None = st.session_state.pipeline
+logger: EvaluationLogger = st.session_state.eval_logger
 
 # ── hero ──────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -866,6 +1003,18 @@ if submit:
             try:
                 result: QueryResult = pipeline.query(question)
                 st.session_state.last_result = result
+                # Live session-history tracking: record this Q&A immediately,
+                # before any score is saved, so it shows up in the sidebar
+                # "Session History" trail right away (requirement: every
+                # answer is appended, not just scored ones).
+                st.session_state.eval_records.append({
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "kind": "answer",
+                    "question": result.question,
+                    "mode": "rag",
+                    "answer_preview": result.rag_answer[:200],
+                    "average": None,
+                })
             except Exception as exc:
                 st.error(f"Query failed: {exc}")
                 st.session_state.last_result = None
@@ -971,7 +1120,7 @@ if result:
         st.markdown("### Manual Evaluation")
         st.caption(
             "Score each answer on the four metrics below (1 = poor, 10 = excellent). "
-            "Results are saved to CSV."
+            "Saved scores appear in Session History in the sidebar."
         )
         for mode, answer in [("baseline", result.baseline_answer), ("rag", result.rag_answer)]:
             st.markdown(f"#### {mode.upper()} Answer")
@@ -1009,8 +1158,30 @@ if result:
                     notes=notes,
                 )
                 logger.log(ev)
+                # Mirror the same row into session_state so the sidebar
+                # "Session History" has an immediate, reliable in-memory
+                # source — avoids any dependency on file-read timing within
+                # the same rerun.
+                row = {"timestamp": datetime.utcnow().isoformat(), "kind": "score"} | ev.to_dict()
+                st.session_state.eval_records.append(row)
                 st.success(
                     f"{mode.upper()} score saved — "
                     f"Average: {ev.average_score}/10 {format_score_badge(ev.average_score)}"
                 )
             st.markdown("---")
+
+# ── sidebar (desktop) ─────────────────────────────────────────────────────────
+# Rendered at the very end of the script — deliberately AFTER the Ask-button
+# query logic and the Evaluate-tab score-save logic above, both of which can
+# append to st.session_state.eval_records earlier in this same run. Streamlit
+# executes the script top-to-bottom on every interaction; rendering the
+# sidebar before those append points meant Session History always displayed
+# last run's data, one rerun behind (the bug: a new question appeared to
+# vanish until a second, unrelated interaction triggered another rerun).
+# Placing it last guarantees it always reflects this run's final state.
+with st.sidebar:
+    st.markdown("## ResearchRAG")
+    st.markdown("---")
+    _render_system_controls(pipeline, logger, key_suffix="sidebar")
+
+
